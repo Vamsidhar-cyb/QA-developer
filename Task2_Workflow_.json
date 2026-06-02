@@ -1,0 +1,289 @@
+{
+  "name": "Morning Brief — GitHub Trending + Discord Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "node-schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "notes": "Fires every hour. For testing, change to every 1 minute."
+    },
+    {
+      "parameters": {
+        "url": "https://api.github.com/search/repositories",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q",     "value": "topic:automation language:javascript stars:>100 pushed:>2024-01-01" },
+            { "name": "sort",  "value": "stars" },
+            { "name": "order", "value": "desc" },
+            { "name": "per_page", "value": "10" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Accept",               "value": "application/vnd.github.v3+json" },
+            { "name": "X-GitHub-Api-Version", "value": "2022-11-28" }
+          ]
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": { "response": { "fullResponse": false } }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "cred-github-token", "name": "GitHub PAT" }
+      },
+      "id": "node-github-search",
+      "name": "GitHub — Search Repos",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [460, 300],
+      "continueOnFail": true,
+      "notes": "Searches GitHub for top JS automation repos. Uses GitHub PAT from credentials store."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ── Transform: keep top 5 repos, reshape fields ──────────────────────────\nconst items = $input.all();\n\n// Handle upstream errors gracefully\nif (!items[0]?.json?.items) {\n  return [{ json: { error: true, message: 'GitHub search returned no items', raw: items[0]?.json } }];\n}\n\nconst repos = items[0].json.items;\n\n// Sort by stars (API should already sort but let's be safe)\nconst sorted = repos\n  .sort((a, b) => b.stargazers_count - a.stargazers_count)\n  .slice(0, 5);\n\n// Reshape to clean objects\nconst top5 = sorted.map((r, i) => ({\n  rank:         i + 1,\n  name:         r.full_name,\n  description:  r.description || 'No description provided.',\n  stars:        r.stargazers_count,\n  forks:        r.forks_count,\n  language:     r.language || 'Unknown',\n  url:          r.html_url,\n  owner:        r.owner.login,\n  ownerAvatar:  r.owner.avatar_url,\n  defaultBranch: r.default_branch || 'main',\n  updatedAt:    r.updated_at,\n  openIssues:   r.open_issues_count,\n  topics:       (r.topics || []).slice(0, 3).join(', '),\n}));\n\n// Return as individual items so downstream nodes can loop\nreturn top5.map(r => ({ json: r }));"
+      },
+      "id": "node-transform",
+      "name": "Transform — Top 5 Repos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300],
+      "notes": "Sorts by stars, keeps top 5, reshapes each repo into a clean flat object."
+    },
+    {
+      "parameters": {
+        "url": "=https://api.github.com/repos/{{ $json.name }}/readme",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Accept",               "value": "application/vnd.github.v3+json" },
+            { "name": "X-GitHub-Api-Version", "value": "2022-11-28" }
+          ]
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": { "id": "cred-github-token", "name": "GitHub PAT" }
+      },
+      "id": "node-enrich-readme",
+      "name": "Enrich — Fetch README",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [900, 300],
+      "continueOnFail": true,
+      "notes": "For each of the top 5 repos, fetches the README metadata. Runs once per item."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Merge README snippet back onto the repo item\nconst repo = $('Transform — Top 5 Repos').item.json;\nconst readmeData = $input.item.json;\n\nlet readmeSnippet = '(README unavailable)';\n\nif (readmeData?.content) {\n  try {\n    // README content is base64-encoded\n    const decoded = Buffer.from(readmeData.content, 'base64').toString('utf-8');\n    // Take first 280 chars as snippet (≈ tweet length)\n    readmeSnippet = decoded\n      .replace(/[#*`>\\[\\]]/g, '')  // strip markdown symbols\n      .replace(/\\n+/g, ' ')        // collapse newlines\n      .trim()\n      .substring(0, 280);\n    if (decoded.length > 280) readmeSnippet += '…';\n  } catch (e) {\n    readmeSnippet = '(README decode error)';\n  }\n} else if (readmeData?.error) {\n  readmeSnippet = '(No README found)';\n}\n\nreturn {\n  json: {\n    ...repo,\n    readmeSnippet,\n  }\n};"
+      },
+      "id": "node-merge-readme",
+      "name": "Merge README Snippet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300],
+      "notes": "Decodes base64 README, trims to 280 chars, merges back with repo data."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "cond-stars",
+              "leftValue":  "={{ $json.stars }}",
+              "rightValue": 1000,
+              "operator": {
+                "type":       "number",
+                "operation":  "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if-stars",
+      "name": "IF — Stars >= 1000?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 300],
+      "notes": "Routes to HOT badge if stars >= 1000, otherwise RISING badge."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return { json: { ...$json, badge: '🔥 HOT', tier: 'hot' } };"
+      },
+      "id": "node-badge-hot",
+      "name": "Badge — HOT",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 200],
+      "notes": "Tags repos with 1000+ stars as HOT."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return { json: { ...$json, badge: '📈 RISING', tier: 'rising' } };"
+      },
+      "id": "node-badge-rising",
+      "name": "Badge — RISING",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 420],
+      "notes": "Tags repos with fewer than 1000 stars as RISING."
+    },
+    {
+      "parameters": {
+        "mode": "combineBySql",
+        "query": "SELECT * FROM input1 UNION ALL SELECT * FROM input2 ORDER BY stars DESC"
+      },
+      "id": "node-merge",
+      "name": "Merge Branches",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1780, 300],
+      "notes": "Re-combines HOT and RISING items, sorted by stars."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Build the Discord embed payload\nconst items = $input.all().map(i => i.json);\nconst now = new Date().toUTCString();\n\n// Build one embed field per repo\nconst fields = items.map(r => ({\n  name: `${r.badge}  #${r.rank}  ${r.name}`,\n  value: [\n    `> ${r.description.substring(0, 120)}`,\n    `\\`\\`\\`${r.readmeSnippet.substring(0, 200)}\\`\\`\\``,\n    `⭐ ${r.stars.toLocaleString()}  •  🍴 ${r.forks.toLocaleString()}  •  🐛 ${r.openIssues} open issues`,\n    `🔤 ${r.language}   🏷️ ${r.topics || 'no topics'}`,\n    `🔗 [View on GitHub](${r.url})`,\n  ].join('\\n'),\n  inline: false\n}));\n\nconst payload = {\n  username:   'Morning Brief Bot',\n  avatar_url: 'https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png',\n  embeds: [{\n    title:       '🌅 GitHub Automation Digest — Top 5 Repos',\n    description: `Your daily brief of trending **JavaScript automation** repositories on GitHub.\\nGenerated at ${now}`,\n    color:       3447003,\n    fields:      fields,\n    footer: {\n      text: 'n8n Morning Brief Workflow  •  Powered by GitHub REST API'\n    },\n    timestamp: new Date().toISOString()\n  }]\n};\n\nreturn [{ json: payload }];"
+      },
+      "id": "node-build-payload",
+      "name": "Build Discord Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 300],
+      "notes": "Assembles the final Discord webhook payload with rich embeds for each repo."
+    },
+    {
+      "parameters": {
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpQueryAuth": { "id": "cred-discord-webhook", "name": "Discord Webhook URL" }
+      },
+      "id": "node-discord-post",
+      "name": "Discord — Post Digest",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2220, 300],
+      "continueOnFail": true,
+      "notes": "POSTs the digest to Discord. URL stored in credentials — never hard-coded."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Log result / handle delivery failure\nconst result = $input.all()[0];\nconst ok = result?.json?.code !== undefined ? false : true;\n\nif (!ok) {\n  // Would push to Slack/email fallback in production\n  console.error('Discord delivery failed:', JSON.stringify(result.json));\n  return [{ json: { status: 'discord_failed', detail: result.json, ts: new Date().toISOString() } }];\n}\n\nreturn [{ json: { status: 'delivered', ts: new Date().toISOString() } }];"
+      },
+      "id": "node-delivery-check",
+      "name": "Delivery Check / Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2440, 300],
+      "notes": "Checks Discord response; logs success or routes failure for alerting."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Error handler — catches failures from any node in the workflow\nconst err = $input.all()[0]?.json;\nconsole.error('[ERROR TRIGGER] Workflow error:', JSON.stringify(err));\n// In production: send alert email / Slack message\nreturn [{ json: { handled: true, error: err, ts: new Date().toISOString() } }];"
+      },
+      "id": "node-error-handler",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 600],
+      "notes": "Connected via Error Trigger. Catches any unhandled node failure and logs it."
+    },
+    {
+      "parameters": {},
+      "id": "node-error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [1120, 600],
+      "notes": "Fires automatically when any node in the workflow throws an error."
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[{ "node": "GitHub — Search Repos", "type": "main", "index": 0 }]]
+    },
+    "GitHub — Search Repos": {
+      "main": [[{ "node": "Transform — Top 5 Repos", "type": "main", "index": 0 }]]
+    },
+    "Transform — Top 5 Repos": {
+      "main": [[{ "node": "Enrich — Fetch README", "type": "main", "index": 0 }]]
+    },
+    "Enrich — Fetch README": {
+      "main": [[{ "node": "Merge README Snippet", "type": "main", "index": 0 }]]
+    },
+    "Merge README Snippet": {
+      "main": [[{ "node": "IF — Stars >= 1000?", "type": "main", "index": 0 }]]
+    },
+    "IF — Stars >= 1000?": {
+      "main": [
+        [{ "node": "Badge — HOT",    "type": "main", "index": 0 }],
+        [{ "node": "Badge — RISING", "type": "main", "index": 0 }]
+      ]
+    },
+    "Badge — HOT": {
+      "main": [[{ "node": "Merge Branches", "type": "main", "index": 0 }]]
+    },
+    "Badge — RISING": {
+      "main": [[{ "node": "Merge Branches", "type": "main", "index": 1 }]]
+    },
+    "Merge Branches": {
+      "main": [[{ "node": "Build Discord Payload", "type": "main", "index": 0 }]]
+    },
+    "Build Discord Payload": {
+      "main": [[{ "node": "Discord — Post Digest", "type": "main", "index": 0 }]]
+    },
+    "Discord — Post Digest": {
+      "main": [[{ "node": "Delivery Check / Log", "type": "main", "index": 0 }]]
+    },
+    "Error Trigger": {
+      "main": [[{ "node": "Error Handler", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    { "createdAt": "2025-06-02T00:00:00.000Z", "updatedAt": "2025-06-02T00:00:00.000Z", "id": "tag-morning-brief", "name": "morning-brief" }
+  ],
+  "triggerCount": 0,
+  "updatedAt": "2025-06-02T00:00:00.000Z",
+  "versionId": "v1-morning-brief"
+}

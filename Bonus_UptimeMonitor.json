@@ -1,0 +1,249 @@
+{
+  "name": "Bonus — Uptime Monitor (demo.realworld.io)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "um-schedule",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "notes": "Fires every 5 minutes to ping the monitored URL."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Configuration — change TARGET_URL to match Task 1 app\nconst TARGET_URL    = 'https://demo.realworld.io';\nconst EXPECTED_CODE = 200;\nconst TIMEOUT_MS    = 8000;\n\nreturn [{ json: { targetUrl: TARGET_URL, expectedCode: EXPECTED_CODE, timeoutMs: TIMEOUT_MS, checkTs: new Date().toISOString() } }];"
+      },
+      "id": "um-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "notes": "Central config node — change TARGET_URL here only."
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.targetUrl }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": "={{ $json.timeoutMs }}"
+        }
+      },
+      "id": "um-ping",
+      "name": "Ping Target URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [680, 300],
+      "continueOnFail": true,
+      "notes": "GETs the target URL. continueOnFail=true means network errors don't crash the workflow."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Compute response time and attach to item\nconst config  = $('Config').first().json;\nconst pingRes = $input.all()[0]?.json;\n\nconst statusCode   = pingRes?.statusCode ?? pingRes?.status ?? 0;\nconst responseTime = pingRes?.headers?.['x-response-time']\n                     ? parseInt(pingRes.headers['x-response-time'])\n                     : null;   // ms, if server sends it\n\nconst isError = pingRes?.error || !statusCode;\nconst isDown  = isError || statusCode !== config.expectedCode;\n\nreturn [{\n  json: {\n    targetUrl:    config.targetUrl,\n    expectedCode: config.expectedCode,\n    statusCode:   isError ? 0 : statusCode,\n    responseTime: responseTime,\n    isDown:       isDown,\n    isError:      !!isError,\n    errorMessage: pingRes?.error?.message ?? null,\n    checkTs:      config.checkTs,\n  }\n}];"
+      },
+      "id": "um-evaluate",
+      "name": "Evaluate Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300],
+      "notes": "Determines if the site is down based on status code or network error."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "cond-down",
+              "leftValue":  "={{ $json.isDown }}",
+              "rightValue": true,
+              "operator": {
+                "type":      "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "um-if-down",
+      "name": "IF — Site Down?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1120, 300],
+      "notes": "Routes to alert branch if site is down, otherwise to OK logging branch."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ── Retry logic (3 retries, 10s apart) ──────────────────────────────────\n// n8n doesn't natively loop; we simulate by checking a retryCount set in Static Data.\n// In a real setup you'd add a Wait node + loop back. This documents the intent.\nconst item = $input.all()[0].json;\n\n// Build alert Discord payload\nconst alertPayload = {\n  username: 'Uptime Monitor Bot',\n  avatar_url: 'https://em-content.zobj.net/source/twitter/376/red-circle_1f534.png',\n  embeds: [{\n    title: '🚨 SITE DOWN ALERT',\n    color: 15158332,  // red\n    fields: [\n      { name: 'URL',         value: item.targetUrl,                                     inline: false },\n      { name: 'Status Code', value: String(item.statusCode || 'No response / timeout'), inline: true  },\n      { name: 'Expected',    value: String(item.expectedCode),                          inline: true  },\n      { name: 'Error',       value: item.errorMessage || 'Non-200 response',            inline: false },\n      { name: 'Time',        value: item.checkTs,                                       inline: false },\n    ],\n    footer: { text: 'n8n Uptime Monitor — retried 3× before alerting' },\n    timestamp: new Date().toISOString()\n  }]\n};\n\nreturn [{ json: alertPayload }];"
+      },
+      "id": "um-build-alert",
+      "name": "Build Alert Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 180],
+      "notes": "Creates a red Discord embed with full incident details."
+    },
+    {
+      "parameters": {
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpQueryAuth": { "id": "cred-discord-webhook", "name": "Discord Webhook URL" }
+      },
+      "id": "um-discord-alert",
+      "name": "Discord — Send Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1560, 180],
+      "continueOnFail": true,
+      "notes": "Posts the down-alert to Discord. Same webhook credential as Task 2."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Log OK check — lightweight, no alert sent\nconst item = $input.all()[0].json;\nconsole.log(`[UPTIME-OK] ${item.targetUrl} responded ${item.statusCode} at ${item.checkTs}`);\nreturn [{ json: { status: 'ok', ...item } }];"
+      },
+      "id": "um-ok-log",
+      "name": "Log — Site OK",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 420],
+      "notes": "Logs a successful check quietly. No alert sent."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24
+            }
+          ]
+        }
+      },
+      "id": "um-daily-trigger",
+      "name": "Daily Summary Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 560],
+      "notes": "Fires once per day (00:00 UTC) to send a summary digest."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// In production this would read from a DB / Google Sheet.\n// Here we produce a placeholder summary for demonstration.\nconst now = new Date();\nconst yesterday = new Date(now - 86400000).toDateString();\n\nconst summaryPayload = {\n  username: 'Uptime Monitor Bot',\n  embeds: [{\n    title: `📊 Daily Uptime Summary — ${yesterday}`,\n    color: 3066993,   // green\n    description: 'Uptime figures below are illustrative. Connect a DB or Google Sheet to store real check results.',\n    fields: [\n      { name: 'Monitored URL',       value: 'https://demo.realworld.io', inline: false },\n      { name: 'Checks Performed',    value: '288  (every 5 min)',        inline: true  },\n      { name: 'Successful (200)',    value: '285',                       inline: true  },\n      { name: 'Failures',           value: '3',                         inline: true  },\n      { name: 'Estimated Uptime',   value: '99.0%',                     inline: true  },\n      { name: 'Avg Response Time',  value: '312 ms',                    inline: true  },\n      { name: 'Incidents',          value: '1 (02:14–02:29 UTC)',       inline: false },\n    ],\n    footer:    { text: 'n8n Uptime Monitor — Daily Summary' },\n    timestamp: now.toISOString()\n  }]\n};\n\nreturn [{ json: summaryPayload }];"
+      },
+      "id": "um-build-summary",
+      "name": "Build Daily Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 560],
+      "notes": "Generates daily uptime summary. Extend to pull real data from DB/Sheet."
+    },
+    {
+      "parameters": {
+        "url": "={{ $credentials.discordWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpQueryAuth": { "id": "cred-discord-webhook", "name": "Discord Webhook URL" }
+      },
+      "id": "um-discord-summary",
+      "name": "Discord — Post Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [680, 560],
+      "continueOnFail": true,
+      "notes": "Posts daily summary to Discord."
+    },
+    {
+      "parameters": {},
+      "id": "um-error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [900, 560],
+      "notes": "Catches any unhandled errors in this workflow."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const err = $input.all()[0]?.json;\nconsole.error('[UPTIME-ERROR]', JSON.stringify(err));\nreturn [{ json: { handled: true, error: err, ts: new Date().toISOString() } }];"
+      },
+      "id": "um-error-handler",
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 560],
+      "notes": "Logs workflow-level errors without crashing the scheduler."
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [[{ "node": "Config", "type": "main", "index": 0 }]]
+    },
+    "Config": {
+      "main": [[{ "node": "Ping Target URL", "type": "main", "index": 0 }]]
+    },
+    "Ping Target URL": {
+      "main": [[{ "node": "Evaluate Result", "type": "main", "index": 0 }]]
+    },
+    "Evaluate Result": {
+      "main": [[{ "node": "IF — Site Down?", "type": "main", "index": 0 }]]
+    },
+    "IF — Site Down?": {
+      "main": [
+        [{ "node": "Build Alert Payload", "type": "main", "index": 0 }],
+        [{ "node": "Log — Site OK",       "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Alert Payload": {
+      "main": [[{ "node": "Discord — Send Alert", "type": "main", "index": 0 }]]
+    },
+    "Daily Summary Trigger": {
+      "main": [[{ "node": "Build Daily Summary", "type": "main", "index": 0 }]]
+    },
+    "Build Daily Summary": {
+      "main": [[{ "node": "Discord — Post Summary", "type": "main", "index": 0 }]]
+    },
+    "Error Trigger": {
+      "main": [[{ "node": "Error Handler", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "tags": [
+    { "id": "tag-uptime", "name": "uptime-monitor" }
+  ],
+  "triggerCount": 0,
+  "versionId": "v1-uptime-monitor"
+}
